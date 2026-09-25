@@ -29,9 +29,12 @@ OUTPUT_PATH = "../../data/metadata_RUSLAN_22200_normalized.csv"
 # « » „ “ ” ' and pandas would otherwise read them as field delimiters.
 CSV_KWARGS = {"sep": "|", "quoting": csv.QUOTE_NONE}
 
-
 if __name__ == "__main__":
+    # Инициализация компонентов
+    # TextFilter автоматически загружает веса из checkpoints/text_filter.pkl
+
     text_filter = TextFilter()
+    
     normalizer = TextNormalizer()
 
     raw = pd.read_csv(INPUT_PATH, names=["id", "raw"], **CSV_KWARGS)

@@ -8,22 +8,36 @@ Run as a script to score yourself on the development set::
 import csv
 import pathlib
 import re
+import os
 import random
+import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score, precision_score, recall_score
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+import joblib
 
+# Пути к файлам 
 SCRIPT_DIR = pathlib.Path(__file__).parent
 DEV_SET_PATH = SCRIPT_DIR / "data" / "dev_sentences.csv"
+
+# Путь для сохранения весов модели
+CHECKPOINT_PATH = SCRIPT_DIR / "checkpoints" / "text_filter.pkl"
 
 class TextFilter:
     """Decides whether an utterance is usable as a training example."""
 
     def __init__(self):
-        """Train the classifier on the dev set."""
-        if not DEV_SET_PATH.exists():
-            raise FileNotFoundError(f"Не найден файл: {DEV_SET_PATH}")
+        """Train the classifier on the dev set or load from checkpoint."""
+        
+        # Если модель уже обучена и сохранена — загружаем её, чтобы избежать переобучения и случайности
+        if CHECKPOINT_PATH.exists():
+            print("Загрузка сохраненной модели...")
+            data = joblib.load(CHECKPOINT_PATH)
+            self.model = data['model']
+            self.vectorizer = data['vectorizer']
+            self.threshold = data['threshold']
+            return
 
         # 1. Загружаем обучающую выборку
         df = pd.read_csv(DEV_SET_PATH, sep="|", encoding="utf-8", quoting=csv.QUOTE_NONE, header=0)
@@ -41,19 +55,26 @@ class TextFilter:
         synth_text = []
         synth_labels = []
         
+        # Фиксируем seed для повторяемости результатов
+        np.random.seed(42)
+        random.seed(42)
+        
         # 50 синтетических примеров "Плохо - Латиница"
-        for _ in range(50):
-            # Берем случайную хорошую фразу и добавляем в нее слова типа "MacBook", "test", "app"
-            base_text = good_examples.sample(1).iloc[0]['text']
-            trash_word = random.choice(["MacBook", "iPhone", "app", "test", "error", "null"])
+        trash_words = ["MacBook", "iPhone", "app", "test", "error", "null"]
+        for i in range(50):
+            # Теперь мы используем детерминированный выбор по индексу (i % length),
+            # чтобы каждый раз брать именно те же слова и фразы, а не случайные.
+            base_text = good_examples.iloc[i % len(good_examples)]['text']
+            trash_word = trash_words[i % len(trash_words)]
             synth_text.append(f"{trash_word} {base_text}")
             synth_labels.append(0)
             
         # 50 синтетических примеров "Плохо - Цифры"
-        for _ in range(50):
-            base_text = good_examples.sample(1).iloc[0]['text']
-            trash_digits = random.choice(["100", "2026", "999", "000"])
-            synth_text.append(f"{base_text} {trash_digits}")
+        trash_digits = ["100", "2026", "999", "000"]
+        for i in range(50):
+            base_text = good_examples.iloc[i % len(good_examples)]['text']
+            trash_digit = trash_digits[i % len(trash_digits)]
+            synth_text.append(f"{base_text} {trash_digit}")
             synth_labels.append(0)
             
         # Добавляем это к исходному датафрейму
@@ -79,6 +100,11 @@ class TextFilter:
         # но не пропустить явный мусор. С 0.5 остается только около 7000 фраз
         self.threshold = 0.45
 
+        # Сохраняем веса модели в файл (checkpoints), чтобы в следующий раз не обучать её заново
+        os.makedirs(CHECKPOINT_PATH.parent, exist_ok=True)
+        joblib.dump({'model': self.model, 'vectorizer': self.vectorizer, 'threshold': self.threshold}, CHECKPOINT_PATH)
+        print(f"Модель сохранена в: {CHECKPOINT_PATH}")
+
     def filter(self, text: str) -> int:
         """Classify a single utterance.
         Returns:
@@ -100,7 +126,7 @@ class TextFilter:
         # 2. Передаем текст модели
         X = self.vectorizer.transform([text])
         
-        # Получаем вероятность, что фраза нормизована (класс 1)
+        # Получаем вероятность, что фраза нормализована (класс 1)
         prob = self.model.predict_proba(X)[0][1]
         
         # 3. Возвращаем результат по порогу

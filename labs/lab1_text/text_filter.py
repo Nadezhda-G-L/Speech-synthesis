@@ -8,36 +8,23 @@ Run as a script to score yourself on the development set::
 import csv
 import pathlib
 import re
-import os
 import random
-import numpy as np
 import pandas as pd
 from sklearn.metrics import f1_score, precision_score, recall_score
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-import joblib
+import numpy as np
 
-# Пути к файлам 
 SCRIPT_DIR = pathlib.Path(__file__).parent
 DEV_SET_PATH = SCRIPT_DIR / "data" / "dev_sentences.csv"
-
-# Путь для сохранения весов модели
-CHECKPOINT_PATH = SCRIPT_DIR / "checkpoints" / "text_filter.pkl"
 
 class TextFilter:
     """Decides whether an utterance is usable as a training example."""
 
     def __init__(self):
-        """Train the classifier on the dev set or load from checkpoint."""
-        
-        # Если модель уже обучена и сохранена — загружаем её, чтобы избежать переобучения и случайности
-        if CHECKPOINT_PATH.exists():
-            print("Загрузка сохраненной модели...")
-            data = joblib.load(CHECKPOINT_PATH)
-            self.model = data['model']
-            self.vectorizer = data['vectorizer']
-            self.threshold = data['threshold']
-            return
+        """Train the classifier on the dev set."""
+        if not DEV_SET_PATH.exists():
+            raise FileNotFoundError(f"Не найден файл: {DEV_SET_PATH}")
 
         # 1. Загружаем обучающую выборку
         df = pd.read_csv(DEV_SET_PATH, sep="|", encoding="utf-8", quoting=csv.QUOTE_NONE, header=0)
@@ -54,29 +41,45 @@ class TextFilter:
         # Создаем искусственные "плохие" примеры, добавляя мусор к хорошим фразам
         synth_text = []
         synth_labels = []
-        
-        # Фиксируем seed для повторяемости результатов
+
         np.random.seed(42)
         random.seed(42)
-        
-        # 50 синтетических примеров "Плохо - Латиница"
-        trash_words = ["MacBook", "iPhone", "app", "test", "error", "null"]
-        for i in range(50):
-            # Теперь мы используем детерминированный выбор по индексу (i % length),
-            # чтобы каждый раз брать именно те же слова и фразы, а не случайные.
+
+        # Список паттернов мусора. Чередование позиций (сначала в начале, потом в конце)
+        # помогает модели понять, что шум не привязан к конкретной части фразы.
+        trash_patterns = [
+            "(( {0}", "{0} ((",
+            ")) {0}", "{0} ))",
+            "((( {0}", "{0} (((",
+            "))) {0}", "{0} )))",
+            "!! {0}", "{0} !!",
+            "?? {0}", "{0} ??",
+            "!!! {0}", "{0} !!!",
+            "??? {0}", "{0} ???",
+            "Ммм, {0}", "{0} ммм",
+            "ага, {0}", "{0} ага",
+            "хаха, {0}", "{0} хаха",
+            "угу, {0}", "{0} угу",
+            "Гмм, {0}", "{0} гмм",
+            "Хмм, {0}", "{0} хмм",
+            "MacBook {0}", "{0} MacBook",
+            "iPhone {0}", "{0} iPhone",
+            "test {0}", "{0} test",
+            "app {0}", "{0} app",
+            "error {0}", "{0} error",
+            "100 {0}", "{0} 100",
+            "2026 {0}", "{0} 2026",
+            "999 {0}", "{0} 999",
+            "null {0}", "{0} null",
+        ]
+
+        # Детерминированный перебор: берём фразы и мусор строго по индексу
+        for i, pattern in enumerate(trash_patterns):
+            # Циклический доступ без random.choice() и .sample()
             base_text = good_examples.iloc[i % len(good_examples)]['text']
-            trash_word = trash_words[i % len(trash_words)]
-            synth_text.append(f"{trash_word} {base_text}")
+            synth_text.append(pattern.format(base_text))
             synth_labels.append(0)
-            
-        # 50 синтетических примеров "Плохо - Цифры"
-        trash_digits = ["100", "2026", "999", "000"]
-        for i in range(50):
-            base_text = good_examples.iloc[i % len(good_examples)]['text']
-            trash_digit = trash_digits[i % len(trash_digits)]
-            synth_text.append(f"{base_text} {trash_digit}")
-            synth_labels.append(0)
-            
+                    
         # Добавляем это к исходному датафрейму
         df_augmented = pd.DataFrame({
             'text': list(df['text']) + synth_text,
@@ -100,11 +103,6 @@ class TextFilter:
         # но не пропустить явный мусор. С 0.5 остается только около 7000 фраз
         self.threshold = 0.45
 
-        # Сохраняем веса модели в файл (checkpoints), чтобы в следующий раз не обучать её заново
-        os.makedirs(CHECKPOINT_PATH.parent, exist_ok=True)
-        joblib.dump({'model': self.model, 'vectorizer': self.vectorizer, 'threshold': self.threshold}, CHECKPOINT_PATH)
-        print(f"Модель сохранена в: {CHECKPOINT_PATH}")
-
     def filter(self, text: str) -> int:
         """Classify a single utterance.
         Returns:
@@ -126,7 +124,7 @@ class TextFilter:
         # 2. Передаем текст модели
         X = self.vectorizer.transform([text])
         
-        # Получаем вероятность, что фраза нормализована (класс 1)
+        # Получаем вероятность, что фраза нормизована (класс 1)
         prob = self.model.predict_proba(X)[0][1]
         
         # 3. Возвращаем результат по порогу
@@ -147,3 +145,31 @@ if __name__ == "__main__":
     
     print(f"F1 Score is {f1:.4f}, Precision is {prc:.4f}, Recall is {rec:.4f}")
     print(f"Сохранено: {(dev_files['predicted']==1).sum()}, Отброшено: {(dev_files['predicted']==0).sum()}")
+
+    # Ищем примеры, где модель ошиблась
+
+    # 1. False Negative (Модель удалила НОРМУ)
+    # Метка 1 (Норма), а модель сказала 0 (Мусор)
+    false_negatives = dev_files[(dev_files["is_normalized"] == 1) & (dev_files["predicted"] == 0)]
+
+    # 2. False Positive (Модель пропустила МУСОР)
+    # Метка 0 (Мусор), а модель сказала 1 (Норма)
+    false_positives = dev_files[(dev_files["is_normalized"] == 0) & (dev_files["predicted"] == 1)]
+
+    print("\n========================================")
+    print("АНАЛИЗ ОШИБОК МОДЕЛИ")
+    print("========================================")
+
+    print(f"\nМОДЕЛЬ ОШИБАЕТСЯ, УДАЛЯЯ НОРМУ:")
+    print(f"Всего таких примеров: {len(false_negatives)}")
+    print("-" * 40)
+    # Выводим первые 5 примеров для отчета
+    for text in false_negatives["text"].head(5):
+        print(f" - '{text}'")
+
+    print(f"\nМОДЕЛЬ ПРОПУСКАЕТ МУСОР:")
+    print(f"Всего таких примеров: {len(false_positives)}")
+    print("-" * 40)
+    # Выводим первые 5 примеров для отчета
+    for text in false_positives["text"].head(5):
+        print(f" - '{text}'")

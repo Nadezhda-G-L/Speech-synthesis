@@ -17,8 +17,8 @@ class TextNormalizer:
         self.space_before_punct = re.compile(r'\s+([.,!?;:])')
         
         # 2. Гарантируем ровно один пробел после знаков препинания (спасает фразы типа "по набережной,и ветер")
-        self.space_after_punct = re.compile(r'([.,!?;:])\s+')
-        
+        self.space_after_punct = re.compile(r'([.,!?;:])(\s+)')
+
         # 3. Устранение дубликатов и смешанных последовательностей (!. -> !, ??? -> ?)
         self.multi_punct = re.compile(r'([.!?])\s*([.!?]+)')
         self.dup_punct = re.compile(r'([.!?])\1+')
